@@ -1,17 +1,27 @@
 /*
-    Copyright (c) 2007-2015 Contributors as noted in the AUTHORS file
+    Copyright (c) 2007-2016 Contributors as noted in the AUTHORS file
 
-    This file is part of 0MQ.
+    This file is part of libzmq, the ZeroMQ core engine in C++.
 
-    0MQ is free software; you can redistribute it and/or modify it under
-    the terms of the GNU Lesser General Public License as published by
-    the Free Software Foundation; either version 3 of the License, or
+    libzmq is free software; you can redistribute it and/or modify it under
+    the terms of the GNU Lesser General Public License (LGPL) as published
+    by the Free Software Foundation; either version 3 of the License, or
     (at your option) any later version.
 
-    0MQ is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Lesser General Public License for more details.
+    As a special exception, the Contributors give you permission to link
+    this library with independent modules to produce an executable,
+    regardless of the license terms of these independent modules, and to
+    copy and distribute the resulting executable under terms of your choice,
+    provided that you also meet, for each linked independent module, the
+    terms and conditions of the license of that module. An independent
+    module is a module which is not derived from or based on this library.
+    If you modify this library, you must extend this exception to your
+    version of the library.
+
+    libzmq is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+    FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public
+    License for more details.
 
     You should have received a copy of the GNU Lesser General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
@@ -20,14 +30,18 @@
 #ifndef __TESTUTIL_HPP_INCLUDED__
 #define __TESTUTIL_HPP_INCLUDED__
 
+#if defined ZMQ_CUSTOM_PLATFORM_HPP
+#   include "platform.hpp"
+#else
+#   include "../src/platform.hpp"
+#endif
 #include "../include/zmq.h"
 #include "../src/stdint.hpp"
-#include "platform.hpp"
 
 //  This defines the settle time used in tests; raise this if we
 //  get test failures on slower systems due to binds/connects not
 //  settled. Tested to work reliably at 1 msec on a fast PC.
-#define SETTLE_TIME 50         //  In msec
+#define SETTLE_TIME 300         //  In msec
 
 #undef NDEBUG
 #include <time.h>
@@ -37,20 +51,32 @@
 #include <string.h>
 
 #if defined _WIN32
+#   include "../src/windows.hpp"
 #   if defined _MSC_VER
 #       include <crtdbg.h>
 #       pragma warning(disable:4996)
+// iphlpapi is needed for if_nametoindex (not on Windows XP)
+#       if !defined ZMQ_HAVE_WINDOWS_TARGET_XP
+#           pragma comment(lib,"iphlpapi")
+#       endif
 #   endif
 #else
+#   include <pthread.h>
 #   include <unistd.h>
 #   include <signal.h>
 #   include <stdlib.h>
 #   include <sys/wait.h>
+#   include <sys/socket.h>
+#   include <netinet/in.h>
+#   include <arpa/inet.h>
+#   if defined (ZMQ_HAVE_AIX)
+#      include <sys/types.h>
+#      include <sys/socketvar.h>
+#   endif
 #endif
 
 //  Bounce a message from client to server and back
 //  For REQ/REP or DEALER/DEALER pairs only
-
 void
 bounce (void *server, void *client)
 {
@@ -80,7 +106,7 @@ bounce (void *server, void *client)
     rc = zmq_getsockopt (server, ZMQ_RCVMORE, &rcvmore, &sz);
     assert (rc == 0);
     assert (!rcvmore);
-    
+
     //  Send two parts back to client
     rc = zmq_send (server, buffer, 32, ZMQ_SNDMORE);
     assert (rc == 32);
@@ -106,7 +132,6 @@ bounce (void *server, void *client)
 
 //  Same as bounce, but expect messages to never arrive
 //  for security or subscriber reasons.
-
 void
 expect_bounce_fail (void *server, void *client)
 {
@@ -183,7 +208,9 @@ const char *SEQ_END = (const char *) 1;
 //  Sends a message composed of frames that are C strings or null frames.
 //  The list must be terminated by SEQ_END.
 //  Example: s_send_seq (req, "ABC", 0, "DEF", SEQ_END);
-void s_send_seq (void *socket, ...)
+
+void
+s_send_seq (void *socket, ...)
 {
     va_list ap;
     va_start (ap, socket);
@@ -212,7 +239,9 @@ void s_send_seq (void *socket, ...)
 //  the given data which can be either C strings or 0 for a null frame.
 //  The list must be terminated by SEQ_END.
 //  Example: s_recv_seq (rep, "ABC", 0, "DEF", SEQ_END);
-void s_recv_seq (void *socket, ...)
+
+void
+s_recv_seq (void *socket, ...)
 {
     zmq_msg_t msg;
     zmq_msg_init (&msg);
@@ -223,7 +252,7 @@ void s_recv_seq (void *socket, ...)
     va_list ap;
     va_start (ap, socket);
     const char * data = va_arg (ap, const char *);
-    
+
     while (true) {
         int rc = zmq_msg_recv (&msg, socket, 0);
         assert (rc != -1);
@@ -250,7 +279,8 @@ void s_recv_seq (void *socket, ...)
 
 
 //  Sets a zero linger period on a socket and closes it.
-void close_zero_linger (void *socket)
+void
+close_zero_linger (void *socket)
 {
     int linger = 0;
     int rc = zmq_setsockopt (socket, ZMQ_LINGER, &linger, sizeof(linger));
@@ -259,7 +289,8 @@ void close_zero_linger (void *socket)
     assert (rc == 0);
 }
 
-void setup_test_environment()
+void
+setup_test_environment (void)
 {
 #if defined _WIN32
 #   if defined _MSC_VER
@@ -272,8 +303,10 @@ void setup_test_environment()
     // abort test after 121 seconds
     alarm(121);
 #else
+#   if !defined ZMQ_DISABLE_TEST_TIMEOUT
     // abort test after 60 seconds
     alarm(60);
+#   endif
 #endif
 #endif
 #if defined __MVS__
@@ -284,8 +317,11 @@ void setup_test_environment()
 }
 
 //  Provide portable millisecond sleep
-// http://www.cplusplus.com/forum/unices/60161/    http://en.cppreference.com/w/cpp/thread/sleep_for
-void msleep (int milliseconds)
+//  http://www.cplusplus.com/forum/unices/60161/
+//  http://en.cppreference.com/w/cpp/thread/sleep_for
+
+void
+msleep (int milliseconds)
 {
 #ifdef ZMQ_HAVE_WINDOWS
     Sleep (milliseconds);
@@ -294,5 +330,57 @@ void msleep (int milliseconds)
 #endif
 }
 
+// check if IPv6 is available (0/false if not, 1/true if it is)
+// only way to reliably check is to actually open a socket and try to bind it
+int
+is_ipv6_available(void)
+{
+#if defined (ZMQ_HAVE_WINDOWS) && (_WIN32_WINNT < 0x0600)
+    return 0;
+#else
+    int rc, ipv6 = 1;
+    struct sockaddr_in6 test_addr;
+
+    memset (&test_addr, 0, sizeof (test_addr));
+    test_addr.sin6_family = AF_INET6;
+    inet_pton (AF_INET6, "::1", &(test_addr.sin6_addr));
+
+#ifdef ZMQ_HAVE_WINDOWS
+    SOCKET fd = socket (AF_INET6, SOCK_STREAM, IPPROTO_IP);
+    if (fd == INVALID_SOCKET)
+        ipv6 = 0;
+    else {
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&ipv6, sizeof(int));
+        rc = setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&ipv6, sizeof(int));
+        if (rc == SOCKET_ERROR)
+            ipv6 = 0;
+        else {
+            rc = bind (fd, (struct sockaddr *)&test_addr, sizeof (test_addr));
+            if (rc == SOCKET_ERROR)
+                ipv6 = 0;
+        }
+        closesocket (fd);
+    }
+#else
+    int fd = socket (AF_INET6, SOCK_STREAM, IPPROTO_IP);
+    if (fd == -1)
+        ipv6 = 0;
+    else {
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &ipv6, sizeof(int));
+        rc = setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6, sizeof(int));
+        if (rc != 0)
+            ipv6 = 0;
+        else {
+            rc = bind (fd, (struct sockaddr *)&test_addr, sizeof (test_addr));
+            if (rc != 0)
+                ipv6 = 0;
+        }
+        close (fd);
+    }
+#endif
+
+    return ipv6;
+#endif // _WIN32_WINNT < 0x0600
+}
 
 #endif

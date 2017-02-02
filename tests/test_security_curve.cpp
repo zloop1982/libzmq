@@ -1,17 +1,27 @@
 /*
-    Copyright (c) 2007-2015 Contributors as noted in the AUTHORS file
+    Copyright (c) 2007-2016 Contributors as noted in the AUTHORS file
 
-    This file is part of 0MQ.
+    This file is part of libzmq, the ZeroMQ core engine in C++.
 
-    0MQ is free software; you can redistribute it and/or modify it under
-    the terms of the GNU Lesser General Public License as published by
-    the Free Software Foundation; either version 3 of the License, or
+    libzmq is free software; you can redistribute it and/or modify it under
+    the terms of the GNU Lesser General Public License (LGPL) as published
+    by the Free Software Foundation; either version 3 of the License, or
     (at your option) any later version.
 
-    0MQ is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Lesser General Public License for more details.
+    As a special exception, the Contributors give you permission to link
+    this library with independent modules to produce an executable,
+    regardless of the license terms of these independent modules, and to
+    copy and distribute the resulting executable under terms of your choice,
+    provided that you also meet, for each linked independent module, the
+    terms and conditions of the license of that module. An independent
+    module is a module which is not derived from or based on this library.
+    If you modify this library, you must extend this exception to your
+    version of the library.
+
+    libzmq is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+    FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public
+    License for more details.
 
     You should have received a copy of the GNU Lesser General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
@@ -35,6 +45,44 @@ static char client_public [41];
 static char client_secret [41];
 static char server_public [41];
 static char server_secret [41];
+
+#ifdef ZMQ_BUILD_DRAFT_API
+//  Read one event off the monitor socket; return value and address
+//  by reference, if not null, and event number by value. Returns -1
+//  in case of error.
+
+static int
+get_monitor_event (void *monitor, int *value, char **address)
+{
+    //  First frame in message contains event number and value
+    zmq_msg_t msg;
+    zmq_msg_init (&msg);
+    if (zmq_msg_recv (&msg, monitor, 0) == -1)
+        return -1;              //  Interruped, presumably
+    assert (zmq_msg_more (&msg));
+
+    uint8_t *data = (uint8_t *) zmq_msg_data (&msg);
+    uint16_t event = *(uint16_t *) (data);
+    if (value)
+        *value = *(uint32_t *) (data + 2);
+
+    //  Second frame in message contains event address
+    zmq_msg_init (&msg);
+    if (zmq_msg_recv (&msg, monitor, 0) == -1)
+        return -1;              //  Interruped, presumably
+    assert (!zmq_msg_more (&msg));
+
+    if (address) {
+        uint8_t *data = (uint8_t *) zmq_msg_data (&msg);
+        size_t size = zmq_msg_size (&msg);
+        *address = (char *) malloc (size + 1);
+        memcpy (*address, data, size);
+        *address [size] = 0;
+    }
+    return event;
+}
+#endif
+
 
 //  --------------------------------------------------------------------------
 //  This methods receives and validates ZAP requestes (allowing or denying
@@ -92,11 +140,10 @@ static void zap_handler (void *handler)
 
 int main (void)
 {
-#ifndef HAVE_LIBSODIUM
-    printf ("libsodium not installed, skipping CURVE test\n");
+#ifndef ZMQ_HAVE_CURVE
+    printf ("CURVE encryption not installed, skipping test\n");
     return 0;
 #endif
-
     //  Generate new keypairs for this test
     int rc = zmq_curve_keypair (client_public, client_secret);
     assert (rc == 0);
@@ -129,6 +176,21 @@ int main (void)
     rc = zmq_bind (server, "tcp://127.0.0.1:9998");
     assert (rc == 0);
 
+#ifdef ZMQ_BUILD_DRAFT_API
+    //  Monitor handshake events on the server
+    rc = zmq_socket_monitor (server, "inproc://monitor-server",
+            ZMQ_EVENT_HANDSHAKE_SUCCEED | ZMQ_EVENT_HANDSHAKE_FAILED);
+    assert (rc == 0);
+
+    //  Create socket for collecting monitor events
+    void *server_mon = zmq_socket (ctx, ZMQ_PAIR);
+    assert (server_mon);
+
+    //  Connect it to the inproc endpoints so they'll get events
+    rc = zmq_connect (server_mon, "inproc://monitor-server");
+    assert (rc == 0);
+#endif
+
     //  Check CURVE security with valid credentials
     void *client = zmq_socket (ctx, ZMQ_DEALER);
     assert (client);
@@ -144,9 +206,14 @@ int main (void)
     rc = zmq_close (client);
     assert (rc == 0);
 
+#ifdef ZMQ_BUILD_DRAFT_API
+    int event = get_monitor_event (server_mon, NULL, NULL);
+    assert (event == ZMQ_EVENT_HANDSHAKE_SUCCEED);
+#endif
+
     //  Check CURVE security with a garbage server key
     //  This will be caught by the curve_server class, not passed to ZAP
-    char garbage_key [] = "0000111122223333444455556666777788889999";
+    char garbage_key [] = "0000000000000000000000000000000000000000";
     client = zmq_socket (ctx, ZMQ_DEALER);
     assert (client);
     rc = zmq_setsockopt (client, ZMQ_CURVE_SERVERKEY, garbage_key, 41);
@@ -159,6 +226,11 @@ int main (void)
     assert (rc == 0);
     expect_bounce_fail (server, client);
     close_zero_linger (client);
+
+#ifdef ZMQ_BUILD_DRAFT_API
+    event = get_monitor_event (server_mon, NULL, NULL);
+    assert (event == ZMQ_EVENT_HANDSHAKE_FAILED);
+#endif
 
     //  Check CURVE security with a garbage client public key
     //  This will be caught by the curve_server class, not passed to ZAP
@@ -175,6 +247,11 @@ int main (void)
     expect_bounce_fail (server, client);
     close_zero_linger (client);
 
+#ifdef ZMQ_BUILD_DRAFT_API
+    event = get_monitor_event (server_mon, NULL, NULL);
+    assert (event == ZMQ_EVENT_HANDSHAKE_FAILED);
+#endif
+
     //  Check CURVE security with a garbage client secret key
     //  This will be caught by the curve_server class, not passed to ZAP
     client = zmq_socket (ctx, ZMQ_DEALER);
@@ -189,6 +266,11 @@ int main (void)
     assert (rc == 0);
     expect_bounce_fail (server, client);
     close_zero_linger (client);
+
+#ifdef ZMQ_BUILD_DRAFT_API
+    event = get_monitor_event (server_mon, NULL, NULL);
+    assert (event == ZMQ_EVENT_HANDSHAKE_FAILED);
+#endif
 
     //  Check CURVE security with bogus client credentials
     //  This must be caught by the ZAP handler
@@ -209,6 +291,11 @@ int main (void)
     expect_bounce_fail (server, client);
     close_zero_linger (client);
 
+#ifdef ZMQ_BUILD_DRAFT_API
+    event = get_monitor_event (server_mon, NULL, NULL);
+    assert (event == ZMQ_EVENT_HANDSHAKE_FAILED);
+#endif
+
     //  Check CURVE security with NULL client credentials
     //  This must be caught by the curve_server class, not passed to ZAP
     client = zmq_socket (ctx, ZMQ_DEALER);
@@ -217,6 +304,11 @@ int main (void)
     assert (rc == 0);
     expect_bounce_fail (server, client);
     close_zero_linger (client);
+
+#ifdef ZMQ_BUILD_DRAFT_API
+    event = get_monitor_event (server_mon, NULL, NULL);
+    assert (event == ZMQ_EVENT_HANDSHAKE_FAILED);
+#endif
 
     //  Check CURVE security with PLAIN client credentials
     //  This must be caught by the curve_server class, not passed to ZAP
@@ -235,7 +327,7 @@ int main (void)
 
     ip4addr.sin_family = AF_INET;
     ip4addr.sin_port = htons (9998);
-#if (_WIN32_WINNT < 0x0600)
+#if defined (ZMQ_HAVE_WINDOWS) && (_WIN32_WINNT < 0x0600)
     ip4addr.sin_addr.s_addr = inet_addr ("127.0.0.1");
 #else
     inet_pton(AF_INET, "127.0.0.1", &ip4addr.sin_addr);
@@ -273,6 +365,9 @@ int main (void)
     assert (rc == 0);
 
     //  Shutdown
+#ifdef ZMQ_BUILD_DRAFT_API
+    close_zero_linger (server_mon);
+#endif
     rc = zmq_close (server);
     assert (rc == 0);
     rc = zmq_ctx_term (ctx);
